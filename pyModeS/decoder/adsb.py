@@ -13,8 +13,19 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-"""
-The wrapper for decoding ADS-B messages
+"""ADS-B Wrapper.
+
+The ADS-B wrapper also imports functions from the following modules:
+
+- pyModeS.decoder.bds.bds05
+    Functions: ``airborne_position``, ``airborne_position_with_ref``, ``altitude``
+- pyModeS.decoder.bds.bds06
+    Functions: ``surface_position``, ``surface_position_with_ref``, ``surface_velocity``
+- pyModeS.decoder.bds.bds08
+    Functions: ``category``, ``callsign``
+- pyModeS.decoder.bds.bds09
+    Functions: ``airborne_velocity``, ``altitude_diff``
+
 """
 
 from __future__ import absolute_import, print_function, division
@@ -132,24 +143,36 @@ def altitude(msg):
         return None
 
 
-def velocity(msg):
+def velocity(msg, rtn_sources=False):
     """Calculate the speed, heading, and vertical rate
     (handles both airborne or surface message)
 
     Args:
         msg (string): 28 bytes hexadecimal message string
+        rtn_source (boolean): If the function will return
+            the sources for direction of travel and vertical
+            rate. This will change the return value from a four
+            element array to a six element array.
 
     Returns:
-        (int, float, int, string): speed (kt), ground track or heading (degree),
-            rate of climb/descend (ft/min), and speed type
-            ('GS' for ground speed, 'AS' for airspeed)
+        (int, float, int, string, string, string): speed (kt),
+            ground track or heading (degree),
+            rate of climb/descent (ft/min), speed type
+            ('GS' for ground speed, 'AS' for airspeed),
+            direction source ('true_north' for ground track / true north
+            as refrence, 'mag_north' for magnetic north as reference),
+            rate of climb/descent source ('Baro' for barometer, 'GNSS'
+            for GNSS constellation).
+            
+            In the case of surface messages, None will be put in place
+            for vertical rate and its respective sources.
     """
 
     if 5 <= typecode(msg) <= 8:
-        return surface_velocity(msg)
+        return surface_velocity(msg, rtn_sources)
 
     elif typecode(msg) == 19:
-        return airborne_velocity(msg)
+        return airborne_velocity(msg, rtn_sources)
 
     else:
         raise RuntimeError("incorrect or inconsistant message types, expecting 4<TC<9 or TC=19")
@@ -221,11 +244,14 @@ def nuc_p(msg):
             or airborne position with GNSS height (20<TC<22)" % msg
         )
 
-    NUCp = uncertainty.TC_NUCp_lookup[tc]
+    try:
+        NUCp = uncertainty.TC_NUCp_lookup[tc]
+        HPL = uncertainty.NUCp[NUCp]['HPL']
+        RCu = uncertainty.NUCp[NUCp]['RCu']
+        RCv = uncertainty.NUCp[NUCp]['RCv']
+    except KeyError:
+        HPL, RCu, RCv = uncertainty.NA, uncertainty.NA, uncertainty.NA
 
-    HPL = uncertainty.NUCp[NUCp]['HPL']
-    RCu = uncertainty.NUCp[NUCp]['RCu']
-    RCv = uncertainty.NUCp[NUCp]['RCv']
 
     if tc in [20, 21]:
         RCv = uncertainty.NA
@@ -252,8 +278,11 @@ def nuc_v(msg):
     msgbin = common.hex2bin(msg)
     NUCv = common.bin2int(msgbin[42:45])
 
-    HVE = uncertainty.NUCv[NUCv]['HVE']
-    VVE = uncertainty.NUCv[NUCv]['VVE']
+    try:
+        HVE = uncertainty.NUCv[NUCv]['HVE']
+        VVE = uncertainty.NUCv[NUCv]['VVE']
+    except KeyError:
+        HVE, VVE = uncertainty.NA, uncertainty.NA
 
     return HVE, VVE
 
@@ -282,8 +311,11 @@ def nic_v1(msg, NICs):
     if isinstance(NIC, dict):
         NIC = NIC[NICs]
 
-    Rc = uncertainty.NICv1[NIC][NICs]['Rc']
-    VPL = uncertainty.NICv1[NIC][NICs]['VPL']
+    try:
+        Rc = uncertainty.NICv1[NIC][NICs]['Rc']
+        VPL = uncertainty.NICv1[NIC][NICs]['VPL']
+    except KeyError:
+        Rc, VPL = uncertainty.NA, uncertainty.NA
 
     return Rc, VPL
 
@@ -314,10 +346,13 @@ def nic_v2(msg, NICa, NICbc):
     else:
         NICs = NICa*2 + NICbc
 
-    if isinstance(NIC, dict):
-        NIC = NIC[NICs]
+    try:
+        if isinstance(NIC, dict):
+            NIC = NIC[NICs]
 
-    Rc = uncertainty.NICv2[NIC][NICs]['Rc']
+        Rc = uncertainty.NICv2[NIC][NICs]['Rc']
+    except KeyError:
+        Rc = uncertainty.NA
 
     return Rc
 
@@ -406,10 +441,14 @@ def nac_p(msg):
     elif tc == 31:
         NACp = common.bin2int(msgbin[76:80])
 
-    EPU = uncertainty.NACp[NACp]['EPU']
-    VEPU = uncertainty.NACp[NACp]['VEPU']
+    try:
+        EPU = uncertainty.NACp[NACp]['EPU']
+        VEPU = uncertainty.NACp[NACp]['VEPU']
+    except KeyError:
+        EPU, VEPU = uncertainty.NA, uncertainty.NA
 
     return EPU, VEPU
+
 
 def nac_v(msg):
     """Calculate NACv, Navigation Accuracy Category - Velocity
@@ -429,8 +468,11 @@ def nac_v(msg):
     msgbin = common.hex2bin(msg)
     NACv = common.bin2int(msgbin[42:45])
 
-    HFOMr = uncertainty.NACv[NACv]['HFOMr']
-    VFOMr = uncertainty.NACv[NACv]['VFOMr']
+    try:
+        HFOMr = uncertainty.NACv[NACv]['HFOMr']
+        VFOMr = uncertainty.NACv[NACv]['VFOMr']
+    except KeyError:
+        HFOMr, VFOMr = uncertainty.NA, uncertainty.NA
 
     return HFOMr, VFOMr
 
@@ -459,8 +501,11 @@ def sil(msg, version):
     elif tc == 31:
         SIL = common.bin2int(msgbin[82:84])
 
-    PE_RCu = uncertainty.SIL[SIL]['PE_RCu']
-    PE_VPL = uncertainty.SIL[SIL]['PE_VPL']
+    try:
+        PE_RCu = uncertainty.SIL[SIL]['PE_RCu']
+        PE_VPL = uncertainty.SIL[SIL]['PE_VPL']
+    except KeyError:
+        PE_RCu, PE_VPL = uncertainty.NA, uncertainty.NA
 
     base = 'unknown'
 

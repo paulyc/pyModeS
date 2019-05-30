@@ -1,21 +1,26 @@
 from __future__ import absolute_import, print_function, division
-import numpy as np
+import os
 import time
+import datetime
+import csv
 import pyModeS as pms
 
 class Stream():
-    def __init__(self, lat0, lon0):
+    def __init__(self, lat0, lon0, dumpto=None):
 
         self.acs = dict()
-
-        self.cache_new_acs = False
-        self.__new_acs = set()
 
         self.lat0 = lat0
         self.lon0 = lon0
 
         self.t = 0
         self.cache_timeout = 60     # seconds
+
+
+        if dumpto is not None and os.path.isdir(dumpto):
+            self.dumpto = dumpto
+        else:
+            self.dumpto = None
 
 
     def process_raw(self, adsb_ts, adsb_msgs, commb_ts, commb_msgs, tnow=None):
@@ -28,6 +33,7 @@ class Stream():
         self.t = tnow
 
         local_updated_acs_buffer = []
+        output_buffer = []
 
         # process adsb message
         for t, msg in zip(adsb_ts, adsb_msgs):
@@ -45,6 +51,8 @@ class Stream():
                     'trk': None,
                     'roc': None,
                     'tas': None,
+                    'roll': None,
+                    'rtrk': None,
                     'ias': None,
                     'mach': None,
                     'hdg': None,
@@ -64,10 +72,13 @@ class Stream():
                     'PE_VPL' : None,
                 }
 
+            self.acs[icao]['t'] = t
             self.acs[icao]['live'] = int(t)
 
             if 1 <= tc <= 4:
-                self.acs[icao]['call'] = pms.adsb.callsign(msg)
+                cs = pms.adsb.callsign(msg)
+                self.acs[icao]['call'] = cs
+                output_buffer.append([t, icao, 'cs', cs])
 
             if (5 <= tc <= 8) or (tc == 19):
                 vdata = pms.adsb.velocity(msg)
@@ -85,6 +96,11 @@ class Stream():
                 self.acs[icao]['roc'] = roc
                 self.acs[icao]['tv'] = t
 
+                output_buffer.append([t, icao, 'gs', spd])
+                output_buffer.append([t, icao, 'trk', trk])
+                output_buffer.append([t, icao, 'roc', roc])
+
+
             if (5 <= tc <= 18):
                 oe = pms.adsb.oe_flag(msg)
                 self.acs[icao][oe] = msg
@@ -98,17 +114,17 @@ class Stream():
                 elif ('t0' in self.acs[icao]) and ('t1' in self.acs[icao]) and \
                      (abs(self.acs[icao]['t0'] - self.acs[icao]['t1']) < 10):
                     # use multi message decoding
-                    # try:
-                    latlon = pms.adsb.position(
-                        self.acs[icao][0],
-                        self.acs[icao][1],
-                        self.acs[icao]['t0'],
-                        self.acs[icao]['t1'],
-                        self.lat0, self.lon0
-                        )
-                    # except:
-                    #     # mix of surface and airborne position message
-                    #     continue
+                    try:
+                        latlon = pms.adsb.position(
+                            self.acs[icao][0],
+                            self.acs[icao][1],
+                            self.acs[icao]['t0'],
+                            self.acs[icao]['t1'],
+                            self.lat0, self.lon0
+                            )
+                    except:
+                        # mix of surface and airborne position message
+                        continue
                 else:
                     latlon = None
 
@@ -116,7 +132,14 @@ class Stream():
                     self.acs[icao]['tpos'] = t
                     self.acs[icao]['lat'] = latlon[0]
                     self.acs[icao]['lon'] = latlon[1]
-                    self.acs[icao]['alt'] = pms.adsb.altitude(msg)
+
+                    alt = pms.adsb.altitude(msg)
+                    self.acs[icao]['alt'] = alt
+
+                    output_buffer.append([t, icao, 'lat', latlon[0]])
+                    output_buffer.append([t, icao, 'lon', latlon[1]])
+                    output_buffer.append([t, icao, 'alt', alt])
+
                     local_updated_acs_buffer.append(icao)
 
             # Uncertainty & accuracy
@@ -136,15 +159,15 @@ class Stream():
             if tc == 19:
                 ac['HVE'], ac['VVE'] = pms.adsb.nuc_v(msg)
                 if ac['ver'] in [1, 2]:
-                    ac['EPU'], ac['VEPU'] = pms.adsb.nac_v(msg)
+                    ac['HFOMr'], ac['VFOMr'] = pms.adsb.nac_v(msg)
 
             if tc == 29:
                 ac['PE_RCu'], ac['PE_VPL'], ac['base'] = pms.adsb.sil(msg, ac['ver'])
-                ac['HFOMr'], ac['VFOMr'] = pms.adsb.nac_p(msg)
+                ac['EPU'], ac['VEPU'] = pms.adsb.nac_p(msg)
 
             if tc == 31:
                 ac['ver']  = pms.adsb.version(msg)
-                ac['HFOMr'], ac['VFOMr'] = pms.adsb.nac_p(msg)
+                ac['EPU'], ac['VEPU'] = pms.adsb.nac_p(msg)
                 ac['PE_RCu'], ac['PE_VPL'], ac['sil_base'] = pms.adsb.sil(msg, ac['ver'])
 
                 if ac['ver']  == 1:
@@ -163,25 +186,48 @@ class Stream():
             bds = pms.bds.infer(msg)
 
             if bds == 'BDS50':
-                tas = pms.commb.tas50(msg)
+                roll50 = pms.commb.roll50(msg)
+                trk50 = pms.commb.trk50(msg)
+                rtrk50 = pms.commb.rtrk50(msg)
+                gs50 = pms.commb.gs50(msg)
+                tas50 = pms.commb.tas50(msg)
 
-                if tas:
-                    self.acs[icao]['t50'] = t
-                    self.acs[icao]['tas'] = tas
+                self.acs[icao]['t50'] = t
+                if tas50:
+                    self.acs[icao]['tas'] = tas50
+                    output_buffer.append([t, icao, 'tas50', tas50])
+                if roll50:
+                    self.acs[icao]['roll'] = roll50
+                    output_buffer.append([t, icao, 'roll50', roll50])
+                if rtrk50:
+                    self.acs[icao]['rtrk'] = rtrk50
+                    output_buffer.append([t, icao, 'rtrk50', rtrk50])
+
+                if trk50:
+                    output_buffer.append([t, icao, 'trk50', trk50])
+                if gs50:
+                    output_buffer.append([t, icao, 'gs50', gs50])
 
             elif bds == 'BDS60':
-                ias = pms.commb.ias60(msg)
-                hdg = pms.commb.hdg60(msg)
-                mach = pms.commb.mach60(msg)
+                ias60 = pms.commb.ias60(msg)
+                hdg60 = pms.commb.hdg60(msg)
+                mach60 = pms.commb.mach60(msg)
+                roc60baro = pms.commb.vr60baro(msg)
+                roc60ins = pms.commb.vr60ins(msg)
 
-                if ias or hdg or mach:
+                if ias60 or hdg60 or mach60:
                     self.acs[icao]['t60'] = t
-                if ias:
-                    self.acs[icao]['ias'] = ias
-                if hdg:
-                    self.acs[icao]['hdg'] = hdg
-                if mach:
-                    self.acs[icao]['mach'] = mach
+                if ias60:
+                    self.acs[icao]['ias'] = ias60
+                if hdg60:
+                    self.acs[icao]['hdg'] = hdg60
+                if mach60:
+                    self.acs[icao]['mach'] = mach60
+
+                if roc60baro:
+                    output_buffer.append([t, icao, 'roc60baro', roc60baro])
+                if roc60ins:
+                    output_buffer.append([t, icao, 'roc60ins', roc60ins])
 
         # clear up old data
         for icao in list(self.acs.keys()):
@@ -189,8 +235,13 @@ class Stream():
                 del self.acs[icao]
                 continue
 
-        if self.cache_new_acs:
-            self.add_new_aircraft(local_updated_acs_buffer)
+        if self.dumpto is not None:
+            dh = str(datetime.datetime.now().strftime("%Y%m%d_%H"))
+            fn = self.dumpto + '/pymodes_dump_%s.csv' % dh
+            output_buffer.sort(key=lambda x: x[0])
+            with open(fn, "a") as f:
+                writer = csv.writer(f)
+                writer.writerows(output_buffer)
 
         return
 
@@ -202,19 +253,3 @@ class Stream():
             if acs[icao]['lat'] is None:
                 acs.pop(icao)
         return acs
-
-    def add_new_aircraft(self, acs):
-        """add new aircraft to the list"""
-        self.__new_acs.update(acs)
-        return
-
-    def get_new_aircraft(self):
-        """update aircraft from last iteration"""
-        newacs = dict()
-        for ac in self.__new_acs:
-            newacs[ac] = self.acs[ac]
-        return newacs
-
-    def reset_new_aircraft(self):
-        """reset the updated icao buffer once been read"""
-        self.__new_acs = set()
